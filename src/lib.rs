@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use bevy::asset::{AssetLoader, AsyncReadExt, LoadContext, LoadedAsset, io::Reader};
+use bevy::asset::{AssetEvent, AssetLoader, LoadContext, io::Reader};
 use bevy::reflect::TypeRegistry;
 use bladeink::{story::Story, story_error::StoryError};
 #[cfg(feature = "scripting")]
@@ -25,12 +25,12 @@ impl Plugin for InkPlugin {
             .register_type::<InkStoryRef>()
             .init_non_send_resource::<InkStories>()
             .init_asset::<InkText>()
-            .init_asset_loader::<InkTextLoader>();
+            .init_asset_loader::<InkTextLoader>()
+            .add_systems(Update, check_loaded_ink_text_assets);
         #[cfg(feature = "scripting")]
         lua::plugin(app);
     }
 }
-
 
 #[derive(Default)]
 struct InkStories(Vec<InkStory>);
@@ -40,12 +40,25 @@ impl InkStories {
         self.0.push(InkStory::Unloaded(handle));
         InkStoryRef { index: self.0.len() - 1 }
     }
+
+    fn try_load_story(&mut self, handle: &Handle<InkText>, ink_text: &InkText) {
+        for story in &mut self.0 {
+            if let InkStory::Unloaded(unloaded_handle) = story {
+                if unloaded_handle.id() == handle.id() {
+                    let story_result = Story::new(&ink_text.0);
+                    *story = InkStory::Loaded {
+                        handle: handle.clone(),
+                        story: story_result,
+                    };
+                }
+            }
+        }
+    }
 }
-        
 
 enum InkStory {
     Unloaded(Handle<InkText>),
-    Loaded(Result<Story, StoryError>),
+    Loaded { handle: Handle<InkText>, story: Result<Story, StoryError> },
 }
 
 #[derive(Debug, Clone, Copy, Reflect)]
@@ -112,6 +125,26 @@ impl AssetLoader for InkTextLoader {
     }
 }
 
+fn check_loaded_ink_text_assets(
+    mut asset_events: EventReader<AssetEvent<InkText>>,
+    mut ink_stories: NonSendMut<InkStories>,
+    ink_text_assets: Res<Assets<InkText>>,
+    mut ink_events: EventWriter<InkEvent>,
+) {
+    for event in asset_events.read() {
+        match event {
+            AssetEvent::LoadedWithDependencies { id } => {
+                if let Some(ink_text) = ink_text_assets.get(*id) {
+                    let handle = Handle::<InkText>::Weak(*id);
+                    ink_stories.try_load_story(&handle, ink_text);
+                    ink_events.write(InkEvent::Load(handle));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 #[cfg(feature = "scripting")]
 mod lua {
     use super::*;
@@ -145,7 +178,7 @@ mod lua {
                      Err(InteropError::cannot_claim_access(
                          raid,
                          world_guard.get_access_location(raid),
-                         "with_system_param",
+                         "ink_load",
                      ))
                  }
             },
