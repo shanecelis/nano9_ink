@@ -1,0 +1,10 @@
+[package]
+name = "nano9_ink"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bevy = "0.16.1"
+bevy_mod_scripting = "0.16.0"
+bladeink = "1.2.1"
+nano9 = "0.1.0-alpha.4"
