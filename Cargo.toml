@@ -15,4 +15,4 @@ default = [ "scripting" ]
 scripting = []
 
 [patch.crates-io]
-bladeink = { path = "../blade-ink-rs" }
+bladeink = { path = "../blade-ink-rs/lib" }

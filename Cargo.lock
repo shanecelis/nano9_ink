@@ -1927,8 +1927,6 @@ dependencies = [
 [[package]]
 name = "bladeink"
 version = "1.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1c1fba6edcfb6d7a8d11723949af98d9352af426ee25ba5dc34602de10ac3d7"
 dependencies = [
  "as-any",
  "getrandom 0.3.4",

@@ -78,6 +78,17 @@ impl InkStories {
                 }
             }).unwrap_or_else(|| Err(InkError::NoSuchStory(*ink_story_ref)))
     }
+
+    fn get_mut(&mut self, ink_story_ref: &InkStoryRef) -> Result<&mut Story, InkError> {
+        self.0.get_mut(ink_story_ref.index)
+            .map(|ink_story| match ink_story {
+                InkStory::Unloaded(_handle) => Err(InkError::NotLoaded),
+                InkStory::Loaded { handle: _, story } => match story {
+                    Ok(story) => Ok(story),
+                    Err(e) => Err(InkError::from(e.clone())),
+                }
+            }).unwrap_or_else(|| Err(InkError::NoSuchStory(*ink_story_ref)))
+    }
 }
 
 enum InkStory {
@@ -141,7 +152,7 @@ impl AssetLoader for InkTextLoader {
     type Error = std::io::Error;
 
     fn extensions(&self) -> &[&str] {
-        &["txt"]
+        &["ink"]
     }
 
     async fn load(
@@ -227,6 +238,43 @@ mod lua {
                         .map_err(|e| InteropError::external(Box::new(e)))
                 })?
             },
-        );
+        )
+        .register(
+            "get_current_choices",
+            |ctx: FunctionCallContext, this: Val<InkStoryRef>| -> Result<Vec<String>, InteropError> {
+                let world = ctx.world()?;
+                world.with_global_access(|world| {
+                    let stories = world.non_send_resource::<InkStories>();
+                    stories.get(&this)
+                        .map(|story| story.get_current_choices().iter().map(|choice| choice.text.clone()).collect())
+                        .map_err(|e| InteropError::external(Box::new(e)))
+                })?
+            },
+        )
+        .register(
+            "choose_choice_index",
+            |ctx: FunctionCallContext, this: Val<InkStoryRef>, index: usize| -> Result<(), InteropError> {
+                let world = ctx.world()?;
+                world.with_global_access(|world| {
+                    let mut stories = world.non_send_resource_mut::<InkStories>();
+                    stories.get_mut(&this)
+                        .and_then(|story| story.choose_choice_index(index).map_err(InkError::from))
+                        .map_err(|e| InteropError::external(Box::new(e)))
+                })?
+            },
+        )
+        .register(
+            "cont",
+            |ctx: FunctionCallContext, this: Val<InkStoryRef>| -> Result<String, InteropError> {
+                let world = ctx.world()?;
+                world.with_global_access(|world| {
+                    let mut stories = world.non_send_resource_mut::<InkStories>();
+                    stories.get_mut(&this)
+                        .and_then(|story| story.cont().map_err(InkError::from))
+                        .map_err(|e| InteropError::external(Box::new(e)))
+                })?
+            },
+        )
+            ;
     }
 }
