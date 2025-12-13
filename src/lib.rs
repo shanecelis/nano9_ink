@@ -1,4 +1,5 @@
 use bevy::prelude::*;
+use bevy::platform::collections::{HashMap, HashSet};
 use bevy::asset::{AssetEvent, AssetLoader, LoadContext, io::Reader};
 use bevy::reflect::TypeRegistry;
 use bladeink::{story::Story, story_error::StoryError};
@@ -31,12 +32,11 @@ impl Plugin for InkPlugin {
             .init_non_send_resource::<InkStories>()
             .init_asset::<InkText>()
             .init_asset_loader::<InkTextLoader>()
-            .add_systems(Update, check_loaded_ink_text_assets);
+            .add_systems(Update, (load_on_add_then_poll, hot_reload_on_modify));
         #[cfg(feature = "scripting")]
         lua::plugin(app);
     }
 }
-
 
 #[derive(Debug, Error)]
 pub enum InkError {
@@ -49,59 +49,114 @@ pub enum InkError {
 }
 
 #[derive(Default)]
-struct InkStories(Vec<InkStory>);
+struct InkStories(HashMap<Entity, Story>);
 
 impl InkStories {
-    fn insert(&mut self, handle: Handle<InkText>) -> InkStoryRef {
-        self.0.push(InkStory::Unloaded(handle));
-        InkStoryRef { index: self.0.len() - 1 }
-    }
-
-    fn try_load_story(&mut self, handle: &Handle<InkText>, ink_text: &InkText) {
-        for story in &mut self.0 {
-            if let InkStory::Unloaded(unloaded_handle) = story {
-                if unloaded_handle.id() == handle.id() {
-                    let story_result = Story::new(&ink_text.0);
-                    *story = InkStory::Loaded {
-                        handle: handle.clone(),
-                        story: story_result,
-                    };
-                }
-            }
-        }
+    fn try_insert(&mut self, id: Entity, ink: &InkText) -> Result<Option<Story>, StoryError> {
+        Story::new(&ink.0)
+            .inspect(|_| { info!("inserted story"); })
+            .map(|story| self.0.insert(id, story))
     }
 
     fn get(&self, ink_story_ref: &InkStoryRef) -> Result<&Story, InkError> {
-        self.0.get(ink_story_ref.index)
-            .map(|ink_story| match ink_story {
-                InkStory::Unloaded(_handle) => Err(InkError::NotLoaded),
-                InkStory::Loaded { handle: _, story } => match story {
-                    Ok(story) => Ok(story),
-                    Err(e) => Err(InkError::from(e.clone())),
-                }
-            }).unwrap_or_else(|| Err(InkError::NoSuchStory(*ink_story_ref)))
+        self.0.get(&ink_story_ref.0)
+            .ok_or(InkError::NotLoaded)
     }
 
     fn get_mut(&mut self, ink_story_ref: &InkStoryRef) -> Result<&mut Story, InkError> {
-        self.0.get_mut(ink_story_ref.index)
-            .map(|ink_story| match ink_story {
-                InkStory::Unloaded(_handle) => Err(InkError::NotLoaded),
-                InkStory::Loaded { handle: _, story } => match story {
-                    Ok(story) => Ok(story),
-                    Err(e) => Err(InkError::from(e.clone())),
-                }
-            }).unwrap_or_else(|| Err(InkError::NoSuchStory(*ink_story_ref)))
+        self.0.get_mut(&ink_story_ref.0)
+            .ok_or(InkError::NotLoaded)
     }
+
 }
 
-enum InkStory {
-    Unloaded(Handle<InkText>),
-    Loaded { handle: Handle<InkText>, story: Result<Story, StoryError> },
+#[derive(Debug, Component, Clone)]
+pub struct InkLoad(pub Handle<InkText>);
+
+#[derive(Debug, Component, Clone)]
+pub struct InkStory;
+
+#[derive(Debug, Asset, TypePath)]
+pub struct InkText(pub String);
+
+fn hot_reload_on_modify(
+    ink_texts: Res<Assets<InkText>>,
+    mut events: EventReader<AssetEvent<InkText>>,
+    mut commands: Commands,
+    mut ink_stories: NonSendMut<InkStories>,
+    // We need to re-fetch the handle while pending.
+    ink_loads: Query<(Entity, &InkLoad)>,
+) {
+    // For each modified asset, rebuild the runtime for all referencing entities.
+    for ev in events.read() {
+        let asset_id = match ev {
+            AssetEvent::Modified { id } => *id,
+            AssetEvent::Removed { id } => {
+                // Optional: handle removal (e.g. remove InkRuntime from entities)
+                // *id
+                continue;
+            }
+            _ => continue,
+        };
+        for (entity, ink) in &ink_loads {
+            if ink.0.id() != asset_id {
+                continue;
+            }
+            info!("reloading ink on {entity}");
+            if let Some(ink_text) = ink_texts.get(&ink.0)
+            && let Err(err) = ink_stories.try_insert(entity, &ink_text) {
+                error!("Error parsing ink reload in {entity}: {err}");
+            }
+
+        }
+    }
+}
+pub fn load_on_add_then_poll(
+    ink_texts: Res<Assets<InkText>>,
+    mut commands: Commands,
+    // Track only entities that *just gained* InkStory.
+    added: Query<(Entity, &InkLoad), Added<InkLoad>>,
+    mut ink_stories: NonSendMut<InkStories>,
+    // We need to re-fetch the handle while pending.
+    stories: Query<&InkLoad>,
+    // Local set of entities waiting for their asset to become available.
+    mut pending: Local<HashSet<Entity>>,
+) {
+    // Start tracking newly-added stories.
+    for (e, _) in &added {
+        pending.insert(e);
+    }
+
+    if pending.is_empty() {
+        return;
+    }
+
+    // Poll pending entities; stop tracking when resolved.
+    pending.retain(|&e| {
+        let Ok(story) = stories.get(e) else {
+            // Entity despawned or component removed.
+            return false;
+        };
+
+        if let Some(ink) = ink_texts.get(&story.0) {
+            match ink_stories.try_insert(e, ink) {
+                Ok(last_story) => {
+                    commands.entity(e).insert(InkStory);
+                }
+                Err(err) => {
+                    error!("Error parsing ink in {e}: {err}");
+                }
+            }
+            false // Remove from pending. Stop waiting.
+        } else {
+            true // Keep waiting.
+        }
+    });
 }
 
 #[derive(Debug, Clone, Copy, Reflect)]
 #[cfg_attr(feature = "scripting", derive(GetTypeDependencies))]
-pub struct InkStoryRef { index: usize }
+pub struct InkStoryRef(pub Entity);
 
 impl InkStoryRef {
     #[cfg(feature = "scripting")]
@@ -118,8 +173,6 @@ impl InkStoryRef {
 #[cfg(feature = "scripting")]
 impl UserData for InkStoryRef {}
 
-#[derive(Asset, TypePath)]
-pub struct InkText(pub String);
 
 #[derive(Default)]
 pub struct InkTextLoader;
@@ -150,26 +203,6 @@ impl AssetLoader for InkTextLoader {
     }
 }
 
-fn check_loaded_ink_text_assets(
-    mut asset_events: EventReader<AssetEvent<InkText>>,
-    mut ink_stories: NonSendMut<InkStories>,
-    ink_text_assets: Res<Assets<InkText>>,
-    mut ink_events: EventWriter<InkEvent>,
-) {
-    for event in asset_events.read() {
-        match event {
-            AssetEvent::LoadedWithDependencies { id } => {
-                if let Some(ink_text) = ink_text_assets.get(*id) {
-                    let handle = Handle::<InkText>::Weak(*id);
-                    ink_stories.try_load_story(&handle, ink_text);
-                    ink_events.write(InkEvent::Load(handle));
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
 #[cfg(feature = "scripting")]
 mod lua {
     use super::*;
@@ -197,8 +230,8 @@ mod lua {
                              let asset_server = world.resource::<AssetServer>();
                              asset_server.load::<InkText>(&path)
                          };
-                         let mut ink_stories = world.non_send_resource_mut::<InkStories>();
-                         ink_stories.insert(ink_text)
+                         let id = world.spawn(InkLoad(ink_text)).id();
+                         InkStoryRef(id)
                      };
                      unsafe { world_guard.release_global_access() };
                      ink_story_ref.into_script_ref(world_guard)
@@ -223,6 +256,16 @@ mod lua {
                         .map(|story| story.can_continue())
                         .map_err(|e| InteropError::external(Box::new(e)))
                 })?
+            },
+        )
+        .register(
+            "is_loaded",
+            |ctx: FunctionCallContext, this: Val<InkStoryRef>| -> Result<bool, InteropError> {
+                let world = ctx.world()?;
+                world.with_global_access(|world| {
+                    let stories = world.non_send_resource::<InkStories>();
+                    stories.get(&this).is_ok()
+                })
             },
         )
         .register(
@@ -260,7 +303,6 @@ mod lua {
                         .map_err(|e| InteropError::external(Box::new(e)))
                 })?
             },
-        )
-            ;
+        );
     }
 }
