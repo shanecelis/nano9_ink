@@ -2,10 +2,9 @@ use super::*;
 use bevy_mod_scripting::{
     GetTypeDependencies,
     bindings::{
-        AppReflectAllocator, ArgMeta, InteropError, IntoScript, IntoScriptRef, ReflectReference,
+        AppReflectAllocator, InteropError, IntoScriptRef, ReflectReference,
         WorldAccessGuard,
-        docgen::typed_through::{ThroughTypeInfo, TypedThrough},
-        function::from::{FromScript, Val},
+        function::from::Val,
         script_value::ScriptValue,
     },
     lua::{LuaScriptingPlugin, mlua::UserData},
@@ -37,7 +36,7 @@ impl UserData for InkStoryRef {}
 fn on_reload_eval_func(
     mut events: EventReader<InkEvent>,
     mut writer: EventWriter<ScriptCallbackEvent>,
-    mut allocator: ResMut<AppReflectAllocator>,
+    allocator: ResMut<AppReflectAllocator>,
 ) {
     // For each modified asset, rebuild the runtime for all referencing entities.
     for ev in events.read() {
@@ -47,7 +46,7 @@ fn on_reload_eval_func(
                 let mut allocator = allocator.write();
                 let story_ref = ReflectReference::new_allocated(story_ref, &mut allocator);
 
-                writer.send(ScriptCallbackEvent::new_for_all_scripts(
+                writer.write(ScriptCallbackEvent::new_for_all_scripts(
                     OnStoryReload,
                     vec![story_ref.into()],
                 ));

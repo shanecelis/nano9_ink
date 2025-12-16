@@ -3,7 +3,6 @@ use bevy::platform::collections::{HashMap, HashSet};
 use bevy::prelude::*;
 use bevy::reflect::TypeRegistry;
 use bladeink::{story::Story, story_error::StoryError};
-use std::any::TypeId;
 use thiserror::Error;
 
 #[cfg(feature = "scripting")]
@@ -33,7 +32,7 @@ pub enum InkError {
     StoryError(#[from] StoryError),
 }
 
-#[derive(Debug, Event)]
+#[derive(Debug, Event, Clone)]
 pub enum InkEvent {
     OnStoryReload(Entity),
 }
@@ -78,7 +77,7 @@ fn hot_reload_on_modify(
     for ev in events.read() {
         let asset_id = match ev {
             AssetEvent::Modified { id } => *id,
-            AssetEvent::Removed { id } => {
+            AssetEvent::Removed { id: _ } => {
                 // Optional: handle removal (e.g. remove InkRuntime from entities)
                 // *id
                 continue;
@@ -91,8 +90,8 @@ fn hot_reload_on_modify(
             }
             info!("reloading ink on {entity}");
             if let Some(ink_text) = ink_texts.get(&ink.0) {
-                match ink_stories.try_parse(entity, &ink_text) {
-                    Ok(last_story) => {
+                match ink_stories.try_parse(entity, ink_text) {
+                    Ok(_last_story) => {
                         writer.write(InkEvent::OnStoryReload(entity));
                     }
                     Err(err) => {
@@ -132,7 +131,7 @@ pub fn load_on_add_then_poll(
 
         if let Some(ink) = ink_texts.get(&story.0) {
             match ink_stories.try_parse(e, ink) {
-                Ok(last_story) => {
+                Ok(_last_story) => {
                     commands.entity(e).insert(InkStory);
                 }
                 Err(err) => {
